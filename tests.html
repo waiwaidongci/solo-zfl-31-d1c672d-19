@@ -15,7 +15,7 @@
   th { background: #f1e7d6; }
   .pass { color: #27632a; font-weight: 800; }
   .fail { color: #a03a2e; font-weight: 800; }
-  .cat-legal { color:#27632a; } .cat-damaged { color:#8a5320; }
+  .cat-legal { color:#27632a; } .cat-damaged { color:#8a5320; } .cat-isolation { color:#713d7b; font-weight:800; }
   .cat-deformed { color:#1f5f78; } .cat-tampered { color:#a03a2e; } .cat-unsolvable { color:#71675c; }
   .detail { color: #76695e; }
   #summary { font-size: 15px; font-weight: 700; margin: 8px 0; }
@@ -215,6 +215,56 @@
       return Raster.verifyImage(img, reg.all(), NOW);
     }},
 
+    // ---------------- 数据隔离（登记→编辑→核验→导出导入） ----------------
+    { cat: "隔离", name: "登记返回副本与核验基准非同一引用", expect: ["valid"], run: function () {
+      var isoReg = new Registry(new Registry.MemoryStore());
+      var res = isoReg.register(Object.assign({ name: "隔离案", cols: C, rows: R, cells: pattern(C, R, 33) },
+        { author: 3141, scope: 5, startYM: "2026-03", months: 24 }));
+      var rec = isoReg.get(res.record.nonce);
+      if (res.embedded.cells === rec.wmCells) return { status: "unknown", reasons: ["返回数组与基准共享引用"] };
+      return WM.verify(res.embedded.cells, C, R, isoReg.all(), NOW);
+    }},
+    { cat: "隔离", name: "登记后继续编辑画布 → 判篡改且原图不被覆盖", expect: ["tampered"], run: function () {
+      var isoReg = new Registry(new Registry.MemoryStore());
+      var res = isoReg.register(Object.assign({ name: "隔离案", cols: C, rows: R, cells: pattern(C, R, 33) },
+        { author: 3141, scope: 5, startYM: "2026-03", months: 24 }));
+      var rec = isoReg.get(res.record.nonce);
+      var fpBefore = rec.fpWm, cell10Before = rec.wmCells[10];
+      var canvas = res.embedded.cells;           // 页面画布持有的是独立副本
+      canvas[10] = canvas[10] === 6 ? 0 : 6;     // 用户继续编辑、改色
+      canvas[80] = canvas[80] === 6 ? 0 : 6;
+      if (rec.fpWm !== fpBefore || rec.wmCells[10] !== cell10Before)
+        return { status: "unknown", reasons: ["核验基准被画布编辑污染（原图被覆盖）"] };
+      if (!isoReg.isIntact(rec)) return { status: "unknown", reasons: ["登记记录失去自洽性"] };
+      var v = WM.verify(canvas, C, R, isoReg.all(), NOW);
+      v.metrics = "被改格 " + v.altered.length + "，基准指纹未变";
+      return v;
+    }},
+    { cat: "隔离", name: "编辑后导出→导入：干净记录被接受、改色仍判篡改", expect: ["valid"], run: function () {
+      var isoReg = new Registry(new Registry.MemoryStore());
+      var res = isoReg.register(Object.assign({ name: "隔离案", cols: C, rows: R, cells: pattern(C, R, 33) },
+        { author: 3141, scope: 5, startYM: "2026-03", months: 24 }));
+      var canvas = res.embedded.cells;
+      canvas[10] = canvas[10] === 6 ? 0 : 6;
+      var data = isoReg.exportJSON();
+      // 导出快照外部再被改也不能污染登记册
+      data.records[0].wmCells[10] = 6;
+      if (!isoReg.isIntact(isoReg.get(res.record.nonce)))
+        return { status: "unknown", reasons: ["导出快照回写污染了登记册"] };
+      var cleanData = isoReg.exportJSON();
+      var reg2 = new Registry(new Registry.MemoryStore());
+      var report = reg2.importJSON(cleanData);
+      if (!report.ok || report.rejected.length !== 0 || report.added !== 1)
+        return { status: "unknown", reasons: ["导出记录被导入拒绝：" + (report.rejected[0] || {}).reason] };
+      var editedV = WM.verify(canvas, C, R, reg2.all(), NOW);
+      if (editedV.status !== "tampered")
+        return { status: "unknown", reasons: ["导入后改色画布应判 tampered，实得 " + editedV.status] };
+      var clean = reg2.all()[0].wmCells;
+      var v = WM.verify(clean, C, R, reg2.all(), NOW);
+      v.metrics = "导出导入往返通过；改色样本=" + editedV.status;
+      return v;
+    }},
+
     // ---------------- 篡改 ----------------
     { cat: "篡改", name: "改 1 格颜色", expect: ["tampered"], run: function () {
       var t = wm.slice(); t[10] = t[10] === 6 ? 0 : 6;
@@ -335,7 +385,7 @@
     try { localStorage.setItem("zfl31WatermarkBrowserCases", JSON.stringify(log)); } catch (e) {}
     window._lastLog = log;
   };
-  function catClass(c) { return { "合法": "legal", "损坏": "damaged", "变形": "deformed", "篡改": "tampered", "无解": "unsolvable" }[c] || ""; }
+  function catClass(c) { return { "合法": "legal", "损坏": "damaged", "变形": "deformed", "隔离": "isolation", "篡改": "tampered", "无解": "unsolvable" }[c] || ""; }
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (x) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[x]; }); }
 
   window.exportLog = function () {

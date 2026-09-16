@@ -128,13 +128,22 @@
     this.store.setItem(STORE_KEY, JSON.stringify({ version: VERSION, records: refs }));
   };
 
+  // 深拷贝整数数组（网格矩阵）。登记记录必须独占数组所有权：
+  // 调用方（页面画布）后续编辑不得影响核验基准。
+  function copyCells(arr) {
+    var out = new Array(arr.length);
+    for (var i = 0; i < arr.length; i++) out[i] = arr[i] | 0;
+    return out;
+  }
+
   // 登记：先嵌水印（保色线数），写两份指纹。返回 {ok, record, embedded}。
+  // 关键隔离：记录内 cells/wmCells 与返回给调用方的 embedded.cells 互为独立副本。
   Registry.prototype.register = function (input) {
     var errors = validateInput(input);
     if (errors.length) return { ok: false, errors: errors };
 
     var cols = input.cols | 0, rows = input.rows | 0;
-    var cells = input.cells.slice();
+    var cells = copyCells(input.cells);
     var em = WM.embed(cells, cols, rows, {
       author: Number(input.author),
       scope: Number(input.scope),
@@ -143,6 +152,7 @@
     });
     if (!em.ok) return { ok: false, errors: [em.hint || ("图案不具备水印容量（可用块 " + em.usable + "）。")], embed: em };
 
+    var wmCells = copyCells(em.cells);
     var record = {
       nonce: nonce(),
       version: VERSION,
@@ -153,12 +163,13 @@
       months: Number(input.months),
       endYM: endYMOf(input.startYM, Number(input.months)),
       cols: cols, rows: rows,
-      cells: cells,                 // 登记时原始方案（水印前）
-      wmCells: em.cells,            // 水印方案（核验基准）
+      cells: cells,                 // 登记时原始方案（水印前，记录独占副本）
+      wmCells: wmCells,             // 水印方案（核验基准，记录独占副本）
       fingerprint: em.fingerprint,  // 原图指纹
       fpWm: em.fpWm,                // 水印图指纹
       tag: em.tag,
       watermarked: true,
+      sealed: true,                 // 记录一经登记即封存，后续只准改名称/备注/续期
       registeredAt: input.registeredAt || todayISO(),
       note: input.note ? String(input.note).slice(0, 200) : ""
     };
@@ -167,7 +178,8 @@
     this.persist();
     return {
       ok: true, record: this.publicView(record),
-      embedded: { cells: em.cells, changedCells: em.changedCells, usedBlocks: em.usedBlocks, minVotes: em.minVotes }
+      // 返回的是又一份独立副本：画布继续编辑不会回写到登记记录
+      embedded: { cells: copyCells(em.cells), changedCells: em.changedCells, usedBlocks: em.usedBlocks, minVotes: em.minVotes }
     };
   };
 
@@ -212,6 +224,16 @@
   Registry.prototype.all = function () { return this.records.slice(); };
   Registry.prototype.count = function () { return this.records.length; };
 
+  // 记录完整性自洽：两份指纹都必须与所存矩阵吻合、色线数量一致。
+  // 封存记录在正常使用中永远成立；仅供诊断/导出前检查。
+  Registry.prototype.isIntact = function (rec) {
+    if (!rec || !rec.wmCells || !rec.cells) return false;
+    if (WM.fingerprint(rec.cells, rec.cols, rec.rows) !== rec.fingerprint) return false;
+    if (WM.fingerprint(rec.wmCells, rec.cols, rec.rows) !== rec.fpWm) return false;
+    if (!WM.sameCounts(rec.cells, rec.wmCells)) return false;
+    return true;
+  };
+
   Registry.prototype.findByAuthor = function (author) {
     var a = Number(author);
     return this.records.filter(function (r) { return r.author === a; });
@@ -247,15 +269,17 @@
 
   /* ----------------------------- 导入导出 ----------------------------- */
 
+  // 导出快照：JSON 往返保证返回对象不与登记册内部共享数组引用
   Registry.prototype.exportJSON = function (nonceIds) {
     var recs = nonceIds ? nonceIds.map(function (id) { return this.index[id]; }, this).filter(Boolean) : this.records;
-    return {
+    var snap = {
       format: "zfl31-brocade-watermark-registry",
       version: VERSION,
       exportedAt: todayISO(),
       count: recs.length,
       records: recs.map(exportRecord)
     };
+    return JSON.parse(JSON.stringify(snap));
   };
 
   function exportRecord(r) {
@@ -266,7 +290,7 @@
       cols: r.cols, rows: r.rows,
       cells: r.cells, wmCells: r.wmCells,
       fingerprint: r.fingerprint, fpWm: r.fpWm, tag: r.tag,
-      watermarked: true, registeredAt: r.registeredAt, note: r.note
+      watermarked: true, sealed: true, registeredAt: r.registeredAt, note: r.note
     };
   }
 
@@ -280,22 +304,37 @@
     }
     if (mode === "replace") { this.records = []; this.index = {}; }
     for (var i = 0; i < parsed.records.length; i++) {
-      var r = parsed.records[i];
-      var err = checkImportRecord(r);
-      if (err) { report.rejected.push({ index: i, name: r && r.name, reason: err }); continue; }
-      var existing = this.index[r.nonce];
+      var src = parsed.records[i];
+      var err = checkImportRecord(src);
+      if (err) { report.rejected.push({ index: i, name: src && src.name, reason: err }); continue; }
+      var existing = this.index[src.nonce];
       if (existing) {
-        if (existing.fpWm !== r.fpWm) {
-          report.rejected.push({ index: i, name: r.name, reason: "同编号记录指纹不一致，拒绝覆盖。" });
+        if (existing.fpWm !== src.fpWm) {
+          report.rejected.push({ index: i, name: src.name, reason: "同编号记录指纹不一致，拒绝覆盖。" });
           continue;
         }
         report.merged++;
-        this.index[r.nonce] = Object.assign({}, existing, r);
-      } else {
-        this.records.push(r);
-        this.index[r.nonce] = r;
-        report.added++;
       }
+      // 入库的是规范化的独立副本，绝不保留对导入对象数组的引用
+      var stored = {
+        nonce: String(src.nonce),
+        version: VERSION,
+        name: String(src.name || ""),
+        author: Number(src.author),
+        scope: Number(src.scope),
+        startYM: src.startYM,
+        months: Number(src.months),
+        endYM: src.endYM || null,
+        cols: src.cols | 0, rows: src.rows | 0,
+        cells: copyCells(src.cells),
+        wmCells: copyCells(src.wmCells),
+        fingerprint: src.fingerprint, fpWm: src.fpWm, tag: src.tag,
+        watermarked: true, sealed: true,
+        registeredAt: src.registeredAt || todayISO(),
+        note: src.note ? String(src.note) : ""
+      };
+      this.index[stored.nonce] = stored;
+      if (!existing) report.added++;
     }
     this.records = Object.keys(this.index).map(function (k) { return this.index[k]; }, this);
     this.persist();

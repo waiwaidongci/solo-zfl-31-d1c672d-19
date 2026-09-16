@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>水印核验 · 本机浏览器用例记录</title>
+<style>
+  body { font-family: Arial, "PingFang SC", sans-serif; background: #f3efe7; color: #282018; margin: 0; padding: 18px; }
+  h1 { font-size: 20px; }
+  .bar { position: sticky; top: 0; background: #f3efe7; padding: 8px 0; border-bottom: 1px solid #d9cdbc; z-index: 2; }
+  button { border: 0; border-radius: 8px; padding: 9px 14px; background: #8d3e37; color: #fff; font-weight: 700; cursor: pointer; margin-right: 8px; }
+  button.sec { background: #71675c; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; background: #fffaf2; margin-top: 10px; }
+  th, td { border: 1px solid #e1d5c5; padding: 5px 7px; text-align: left; vertical-align: top; }
+  th { background: #f1e7d6; }
+  .pass { color: #27632a; font-weight: 800; }
+  .fail { color: #a03a2e; font-weight: 800; }
+  .cat-legal { color:#27632a; } .cat-damaged { color:#8a5320; }
+  .cat-deformed { color:#1f5f78; } .cat-tampered { color:#a03a2e; } .cat-unsolvable { color:#71675c; }
+  .detail { color: #76695e; }
+  #summary { font-size: 15px; font-weight: 700; margin: 8px 0; }
+  canvas { border: 2px solid #72533c; image-rendering: pixelated; background: #72533c; margin: 2px; }
+  .thumbs td { text-align: center; }
+  .note { color:#76695e; font-size:12px; }
+</style>
+</head>
+<body>
+<h1>离线水印核验 · 本机浏览器用例记录</h1>
+<p class="note">在浏览器中直接打开本页即可运行。五类案例：<b class="cat-legal">合法</b>、<b class="cat-damaged">损坏</b>、
+<b class="cat-deformed">变形</b>（裁切/缩放/旋转/翻转/颜色量化）、<b class="cat-tampered">篡改</b>、<b class="cat-unsolvable">无解</b>。
+全部判定经过真实 &lt;canvas&gt; 渲染与图像恢复通道。结果可导出 JSON、存入 localStorage 供事后查看。</p>
+<div class="bar">
+  <button onclick="runAll()">运行全部用例</button>
+  <button class="sec" onclick="exportLog()">导出结果 JSON</button>
+  <button class="sec" onclick="downloadHTML()">保存本页（含结果）</button>
+  <button class="sec" onclick="localStorage.removeItem('zfl31WatermarkBrowserCases');location.reload()">清除记录</button>
+  <span id="summary"></span>
+</div>
+<table id="tbl"><thead><tr>
+  <th>#</th><th>类别</th><th>用例</th><th>期望</th><th>实际</th><th>结果</th><th>关键指标 / 原因</th><th>样本</th>
+</tr></thead><tbody></tbody></table>
+
+<script src="js/watermark.js"></script>
+<script src="js/registry.js"></script>
+<script src="js/raster.js"></script>
+<script>
+(function () {
+  "use strict";
+  var PAL = WM.PALETTE;
+  function mulberry(seed) {
+    var a = seed >>> 0;
+    return function () { a |= 0; a = (a + 0x6D2B79F5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  }
+  function pattern(cols, rows, seed) {
+    var rng = mulberry(seed), m = new Array(cols * rows).fill(0);
+    for (var y = 0; y < rows; y++) for (var x = 0; x < cols; x++) {
+      var k = (x * 7 + y * 13 + x * y + seed * 31) % 8;
+      if (k >= 2) m[y * cols + x] = k;
+    }
+    return m;
+  }
+  var NOW = "2026-09";
+  var INFO = { author: 2026, scope: 5, startYM: "2026-03", months: 24 };
+  var reg = new Registry(new Registry.MemoryStore());
+  var regged = reg.register(Object.assign({ name: "浏览器用例纹样", cols: 18, rows: 14,
+    cells: pattern(18, 14, 5) }, INFO));
+  var baseRec = reg.get(regged.record.nonce);
+  var wm = baseRec.wmCells, C = 18, R = 14;
+
+  function mCrop(cells, c, r, x0, x1, y0, y1) {
+    var m = []; for (var y = y0; y < y1; y++) for (var x = x0; x < x1; x++) m.push(cells[y * c + x]);
+    return { cells: m, cols: x1 - x0, rows: y1 - y0, x0: x0, y0: y0 };
+  }
+  function rot90(cells, c, r) {
+    var n = new Array(r * c);
+    for (var y = 0; y < r; y++) for (var x = 0; x < c; x++) n[x * r + (r - 1 - y)] = cells[y * c + x];
+    return { cells: n, cols: r, rows: c };
+  }
+  function flipH(cells, c, r) {
+    var n = new Array(c * r);
+    for (var y = 0; y < r; y++) for (var x = 0; x < c; x++) n[y * c + (c - 1 - x)] = cells[y * c + x];
+    return { cells: n, cols: c, rows: r };
+  }
+  function canvasThumb(img, title) {
+    var scale = Math.min(1, 96 / Math.max(img.width, img.height));
+    var cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(img.width * scale));
+    cv.height = Math.max(1, Math.round(img.height * scale));
+    cv.title = title;
+    cv.getContext("2d").imageSmoothingEnabled = false;
+    var src = Raster.toCanvas(img);
+    cv.getContext("2d").drawImage(src, 0, 0, cv.width, cv.height);
+    return cv;
+  }
+
+  // cases: {cat,name,expect(状态集合),run()->{status,reasons,metrics,thumbs:[{img,title}]}}
+  var CASES = [
+    // ---------------- 合法 ----------------
+    { cat: "合法", name: "原样矩阵", expect: ["valid"], run: function () {
+      var v = WM.verify(wm, C, R, reg.all(), NOW);
+      return v;
+    }},
+    { cat: "合法", name: "PNG 渲染→拍照式恢复（无损）", expect: ["valid"], run: function () {
+      var img = Raster.render(wm, C, R);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "原始渲染" }]; return v;
+    }},
+    { cat: "合法", name: "缩放 ×0.45", expect: ["valid"], run: function () {
+      var img = Raster.scaleBy(Raster.render(wm, C, R), 0.45);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "缩小" }]; return v;
+    }},
+    { cat: "合法", name: "缩放 ×1.8", expect: ["valid"], run: function () {
+      var img = Raster.scaleBy(Raster.render(wm, C, R), 1.8);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "放大" }]; return v;
+    }},
+    { cat: "合法", name: "顺时针旋转 90°", expect: ["valid"], run: function () {
+      var img = Raster.rot90CW(Raster.render(wm, C, R));
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.metrics = "朝向=" + (v.detection && v.detection.orientationText);
+      v.thumbs = [{ img: img, title: "旋转" }]; return v;
+    }},
+    { cat: "合法", name: "旋转 180°", expect: ["valid"], run: function () {
+      var img = Raster.rot180(Raster.render(wm, C, R));
+      return Raster.verifyImage(img, reg.all(), NOW);
+    }},
+    { cat: "合法", name: "水平翻转", expect: ["valid"], run: function () {
+      var img = Raster.flipH(Raster.render(wm, C, R));
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.metrics = "朝向=" + (v.detection && v.detection.orientationText);
+      return v;
+    }},
+    { cat: "合法", name: "垂直翻转", expect: ["valid"], run: function () {
+      var img = Raster.flipV(Raster.render(wm, C, R));
+      return Raster.verifyImage(img, reg.all(), NOW);
+    }},
+    { cat: "合法", name: "颜色量化 2 位/通道", expect: ["valid"], run: function () {
+      var img = Raster.quantize(Raster.render(wm, C, R), 2);
+      return Raster.verifyImage(img, reg.all(), NOW);
+    }},
+    { cat: "合法", name: "组合：缩放0.6+旋转+3位量化+噪声", expect: ["valid"], run: function () {
+      var img = Raster.render(wm, C, R);
+      img = Raster.scaleBy(img, 0.6); img = Raster.rot90CW(img);
+      img = Raster.quantize(img, 3); img = Raster.addNoise(img, 10, mulberry(7));
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "组合攻击后" }]; return v;
+    }},
+    { cat: "合法", name: "授权期限：已过期记录", expectMeta: "term=expired", run: function () {
+      var rr = reg.register({ name: "过期记录", cols: C, rows: R, cells: pattern(C, R, 21),
+        author: 77, scope: 2, startYM: "2020-01", months: 12 });
+      var v = WM.verify(rr.embedded.cells, C, R, reg.all(), NOW);
+      v._expectTerm = "expired"; return v;
+    }},
+    { cat: "合法", name: "授权期限：长期有效", expectMeta: "term=open", run: function () {
+      var rr = reg.register({ name: "长期记录", cols: C, rows: R, cells: pattern(C, R, 22),
+        author: 78, scope: 1, startYM: "2030-01", months: 0 });
+      var v = WM.verify(rr.embedded.cells, C, R, reg.all(), NOW);
+      v._expectTerm = "open"; return v;
+    }},
+
+    // ---------------- 损坏 ----------------
+    { cat: "损坏", name: "裁掉右 2 列、下 3 行（16×11）", expect: ["valid_partial"], run: function () {
+      var cr = mCrop(wm, C, R, 2, 18, 2, 13);
+      var v = WM.verify(cr.cells, cr.cols, cr.rows, reg.all(), NOW);
+      v.metrics = "缺失 " + v.missing.length + " 格，朝向=" + (v.detection && v.detection.orientationText);
+      return v;
+    }},
+    { cat: "损坏", name: "图像裁切（约 2 格）", expect: ["valid_partial"], run: function () {
+      var full = Raster.render(wm, C, R);
+      var img = Raster.crop(full, 56, 56, full.width - 112, full.height - 112);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "裁切图" }]; return v;
+    }},
+    { cat: "损坏", name: "裁切+翻转+缩放组合", expect: ["valid_partial", "valid"], run: function () {
+      var full = Raster.render(wm, C, R);
+      var img = Raster.crop(full, 54, 28, full.width - 80, full.height - 56);
+      img = Raster.flipH(img); img = Raster.scaleBy(img, 1.4);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "裁切+翻转+放大" }]; return v;
+    }},
+    { cat: "损坏", name: "可见区域 2 格改色 + 裁切", expect: ["damaged", "tampered"], run: function () {
+      var cr = mCrop(wm, C, R, 0, 16, 0, 14);
+      cr.cells[10] = cr.cells[10] === 6 ? 0 : 6;
+      cr.cells[120] = cr.cells[120] === 6 ? 0 : 6;
+      var v = WM.verify(cr.cells, cr.cols, cr.rows, reg.all(), NOW);
+      v.metrics = "改格 " + v.altered.length + "，缺格 " + v.missing.length; return v;
+    }},
+
+    // ---------------- 变形（方向/尺度，合法但几何变化） ----------------
+    { cat: "变形", name: "矩阵裁切后旋转 90°", expect: ["valid_partial", "valid"], run: function () {
+      var cr = mCrop(wm, C, R, 2, 18, 2, 13);
+      var rt = rot90(cr.cells, cr.cols, cr.rows);
+      var v = WM.verify(rt.cells, rt.cols, rt.rows, reg.all(), NOW);
+      v.metrics = "朝向=" + (v.detection && v.detection.orientationText); return v;
+    }},
+    { cat: "变形", name: "矩阵裁切后水平翻转", expect: ["valid_partial", "valid"], run: function () {
+      var cr = mCrop(wm, C, R, 0, 16, 0, 14);
+      var fl = flipH(cr.cells, cr.cols, cr.rows);
+      return WM.verify(fl.cells, fl.cols, fl.rows, reg.all(), NOW);
+    }},
+    { cat: "变形", name: "双侧各裁 2 格（14×10）", expect: ["valid_partial", "valid"], run: function () {
+      var cr = mCrop(wm, C, R, 2, 16, 2, 12);
+      return WM.verify(cr.cells, cr.cols, cr.rows, reg.all(), NOW);
+    }},
+    { cat: "变形", name: "非整数倍缩放 ×0.6", expect: ["valid"], run: function () {
+      var img = Raster.scaleBy(Raster.render(wm, C, R), 0.6);
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "0.6x" }]; return v;
+    }},
+    { cat: "变形", name: "缩放0.5+翻转+4位量化", expect: ["valid"], run: function () {
+      var img = Raster.render(wm, C, R);
+      img = Raster.scaleBy(img, 0.5); img = Raster.flipH(img); img = Raster.quantize(img, 4);
+      return Raster.verifyImage(img, reg.all(), NOW);
+    }},
+
+    // ---------------- 篡改 ----------------
+    { cat: "篡改", name: "改 1 格颜色", expect: ["tampered"], run: function () {
+      var t = wm.slice(); t[10] = t[10] === 6 ? 0 : 6;
+      var v = WM.verify(t, C, R, reg.all(), NOW);
+      v.metrics = "被改格 " + v.altered.length + " 个"; return v;
+    }},
+    { cat: "篡改", name: "改 3 格颜色", expect: ["tampered"], run: function () {
+      var t = wm.slice(); [10, 80, 150].forEach(function (i) { t[i] = t[i] === 6 ? 0 : 6; });
+      var v = WM.verify(t, C, R, reg.all(), NOW);
+      v.metrics = "被改格 " + v.altered.length + " 个"; return v;
+    }},
+    { cat: "篡改", name: "改 8 格颜色（水印严重受损仍逐格定位）", expect: ["tampered"], run: function () {
+      var t = wm.slice(); [10,80,150,200,50,220,90,170].forEach(function (i) { t[i] = t[i] === 6 ? 0 : 6; });
+      var v = WM.verify(t, C, R, reg.all(), NOW);
+      v.metrics = "被改格 " + v.altered.length + " 个，回退逐格比对"; return v;
+    }},
+    { cat: "篡改", name: "伪造：同图案重嵌他人作者水印", expect: ["tampered"], run: function () {
+      var f = WM.embed(pattern(C, R, 5), C, R, { author: 9999, scope: 1, startYM: "2026-03", months: 24 });
+      var v = WM.verify(f.cells, C, R, reg.all(), NOW);
+      return v;
+    }},
+    { cat: "篡改", name: "图像上改色后再拍出", expect: ["tampered", "damaged"], run: function () {
+      var img = Raster.render(wm, C, R);
+      // 直接在光栅上涂黑 3 个格块区域
+      for (var k = 0; k < 3; k++) {
+        var idx = [10, 80, 150][k], x = idx % C, y = Math.floor(idx / C);
+        var meta = Raster.render(wm, C, R).meta || { cell: 24, frame: 8 };
+        var full2 = img; void full2;
+        var px = meta.frame + x * (meta.cell + (meta.gap == null ? 2 : meta.gap));
+        var py = meta.frame + y * (meta.cell + (meta.gap == null ? 2 : meta.gap));
+        Raster.smudgeRect(img, px + 4, py + 4, meta.cell - 8, meta.cell - 8);
+      }
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "涂黑 3 格" }]; return v;
+    }},
+
+    // ---------------- 无解 ----------------
+    { cat: "无解", name: "全空白网格", expect: ["unknown"], run: function () {
+      return WM.verify(new Array(C * R).fill(0), C, R, reg.all(), NOW);
+    }},
+    { cat: "无解", name: "规则彩条（无水印结构）", expect: ["unknown"], run: function () {
+      var m = new Array(C * R).fill(0).map(function (_, i) { return i % 8; });
+      return WM.verify(m, C, R, reg.all(), NOW);
+    }},
+    { cat: "无解", name: "另一幅普通纹样（未嵌水印）", expect: ["unknown"], run: function () {
+      return WM.verify(pattern(C, R, 77), C, R, reg.all(), NOW);
+    }},
+    { cat: "无解", name: "8×6 极小残片", expect: ["unknown"], run: function () {
+      var cr = mCrop(wm, C, R, 5, 13, 4, 10);
+      return WM.verify(cr.cells, cr.cols, cr.rows, reg.all(), NOW);
+    }},
+    { cat: "无解", name: "含水印但本机无登记（孤儿水印）", expect: ["orphan"], run: function () {
+      return WM.verify(wm, C, R, [], NOW);
+    }},
+    { cat: "无解", name: "约 1/5 格大面积错读", expect: ["unknown", "damaged", "tampered"], run: function () {
+      var t = wm.slice();
+      for (var i = 0; i < t.length; i += 5) t[i] = (t[i] + 3) % 8;
+      var v = WM.verify(t, C, R, reg.all(), NOW);
+      v.metrics = "不得判 valid"; return v;
+    }},
+    { cat: "无解", name: "重噪声照片（σ≈150，采色明显错误）", expect: ["unknown", "damaged", "tampered"], run: function () {
+      var img = Raster.addNoise(Raster.render(wm, C, R), 150, mulberry(99));
+      var v = Raster.verifyImage(img, reg.all(), NOW);
+      v.thumbs = [{ img: img, title: "重噪声" }];
+      v.metrics = "采色置信 " + (v.recover && v.recover.confidence) + "，状态 " + v.status + "（非 valid 即正确拦截）";
+      return v;
+    }}
+  ];
+
+  function expectationOk(c, v) {
+    if (c.expectMeta) {
+      var want = c.expectMeta.split("=")[1];
+      return v.term && v.term.state === want;
+    }
+    return c.expect.indexOf(v.status) >= 0;
+  }
+  function metricsOf(v) {
+    if (v.metrics) return v.metrics;
+    var parts = [];
+    if (typeof v.confidence === "number") parts.push("可信度 " + Math.round(v.confidence * 100) + "%");
+    if (v.term) parts.push("期限 " + v.term.state);
+    if (v.altered && v.altered.length) parts.push("改格 " + v.altered.length);
+    if (v.missing && v.missing.length) parts.push("缺格 " + v.missing.length);
+    if (v.recover) parts.push("恢复 " + v.recover.cols + "×" + v.recover.rows);
+    if (v.reasons && v.reasons.length) parts.push(v.reasons[0]);
+    return parts.join(" · ");
+  }
+
+  window.runAll = function () {
+    var tbody = document.querySelector("#tbl tbody");
+    tbody.innerHTML = "";
+    var log = { startedAt: new Date().toISOString(), ua: navigator.userAgent, cases: [] };
+    var pass = 0, t0 = performance.now();
+    CASES.forEach(function (c, i) {
+      var v, error = null;
+      try { v = c.run(); } catch (e) { error = String(e && e.stack || e); }
+      var ok = !error && expectationOk(c, v);
+      if (ok) pass++;
+      var tr = document.createElement("tr");
+      var expectText = c.expectMeta || c.expect.join("/");
+      tr.innerHTML = "<td>" + (i + 1) + '</td><td class="cat-' + catClass(c.cat) + '"><b>' + c.cat + "</b></td>" +
+        "<td>" + c.name + "</td><td>" + expectText + "</td>" +
+        '<td class="' + (ok ? "pass" : "fail") + '">' + (error ? "异常" : (v ? v.status : "—")) + "</td>" +
+        '<td class="' + (ok ? "pass" : "fail") + '">' + (ok ? "通过" : "失败") + "</td>" +
+        '<td class="detail">' + (error ? esc(error) : esc(metricsOf(v))) + "</td><td></td>";
+      var tdLast = tr.lastChild;
+      if (!error && v.thumbs) v.thumbs.forEach(function (t) { tdLast.appendChild(canvasThumb(t.img, t.title)); });
+      tbody.appendChild(tr);
+      log.cases.push({ i: i + 1, cat: c.cat, name: c.name, expect: expectText,
+        actual: error ? "ERROR" : v.status, pass: ok, metrics: error ? null : metricsOf(v),
+        reasons: error ? null : (v.reasons || []), error: error });
+    });
+    log.durationMs = Math.round(performance.now() - t0);
+    log.pass = pass; log.total = CASES.length;
+    document.querySelector("#summary").innerHTML =
+      pass + " / " + CASES.length + " 通过 · 耗时 " + log.durationMs + "ms" +
+      (pass === CASES.length ? ' <span class="pass">全部通过 ✅</span>' : ' <span class="fail">' + (CASES.length - pass) + " 项失败</span>");
+    try { localStorage.setItem("zfl31WatermarkBrowserCases", JSON.stringify(log)); } catch (e) {}
+    window._lastLog = log;
+  };
+  function catClass(c) { return { "合法": "legal", "损坏": "damaged", "变形": "deformed", "篡改": "tampered", "无解": "unsolvable" }[c] || ""; }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (x) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[x]; }); }
+
+  window.exportLog = function () {
+    var log = window._lastLog || JSON.parse(localStorage.getItem("zfl31WatermarkBrowserCases") || "null");
+    if (!log) { alert("请先运行用例。"); return; }
+    var blob = new Blob([JSON.stringify(log, null, 2)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "browser-cases-" + log.startedAt.slice(0, 10) + ".json"; a.click();
+  };
+  window.downloadHTML = function () {
+    var blob = new Blob(["<!doctype html>" + document.documentElement.outerHTML], { type: "text/html" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "browser-cases-result.html"; a.click();
+  };
+
+  // 自动恢复上次记录摘要
+  var prev = null;
+  try { prev = JSON.parse(localStorage.getItem("zfl31WatermarkBrowserCases") || "null"); } catch (e) {}
+  if (prev) document.querySelector("#summary").textContent = "上次记录：" + prev.pass + " / " + prev.total + " 通过（" + prev.startedAt + "）";
+  runAll();
+})();
+</script>
+</body>
+</html>

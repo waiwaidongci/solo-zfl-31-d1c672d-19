@@ -1,0 +1,9 @@
+{
+  "name": "brocade-watermark-bench",
+  "version": "1.0.0",
+  "description": "手工织锦纹样排版台：离线版权水印与溯源核验",
+  "private": true,
+  "scripts": {
+    "test": "node test/run-tests.js"
+  }
+}
